@@ -1,9 +1,9 @@
-import asyncio
-import re
-from copy import copy
-
 import aioconsole
 import aiohttp
+import asyncio
+import re
+
+from typing import Callable
 
 
 class ResponseError(Exception):
@@ -19,18 +19,30 @@ class Announcer:
     Asynchronous watchdog for monitoring player activity on Plasmo RP,
     making use of the Plasmo API and notifications daemon in Linux
 
-    :param filename: Path to the file containing list of targeted players
-    :param server: Targeted server type: "sur" (prp.plo.su) or "cr" (crp.plo.su)
-    :param interval: Frequency of the lookups, in seconds
+    :param filename: path to the file containing list of targeted players
+    :param handler: outer function for handling unexpected API behaviour
+    :param interval: frequency of the lookups, in seconds
+    :param server: targeted server type: "sur" (prp.plo.su) or "cr" (crp.plo.su)
     """
 
-    V1_LINK = "https://rp.plo.su/api"
+    API_LINK = "https://rp.plo.su/api"
     SERVERS = ("sur", "cr")
 
-    def __init__(self, filename: str, server: str = "sur", interval: int = 60):
+    # TODO: normalize docstring types
+    def __init__(
+        self,
+        filename: str,
+        handler: Callable = None,
+        interval: int = 60,
+        server: str = "sur",
+    ):
         self.filename = filename
-        self.server = server if server in self.SERVERS else self.SERVERS[0]
+        self.handler = handler if handler else lambda e: print(e)
         self.interval = max(15, interval)
+        self.server = server if server in self.SERVERS else self.SERVERS[0]
+
+        self.counter = 0
+        self.session = aiohttp.ClientSession()
 
         self.targeted_players = self.import_players()
         self.online_players = set()
@@ -74,15 +86,15 @@ class Announcer:
         if player_nick and player_nick in self.online_players:
             self.online_players.remove(player_nick)
 
-    async def send_request(self, route: str, session: aiohttp.ClientSession) -> dict:
+    async def send_request(self, route: str) -> dict:
         """
         Request and handle (to certain extent) data from the Plasmo API
         :param route: URL path of the required method (e.g. /user)
-        :param session: interface provided by aiohttp module
         :return: dict: contents of the JSON object "data"
         """
-        print(route)
-        async with session.get(self.V1_LINK + route) as response:
+        print(self.counter, route)
+        self.counter += 1
+        async with self.session.get(self.API_LINK + route) as response:
             content_type = response.headers.get("Content-Type")
             if not content_type == "application/json":
                 raise ResponseError(
@@ -104,59 +116,47 @@ class Announcer:
                 raise ResponseError(
                     "API returned an internal status of False",
                     "BAD_INTERNAL_STATUS",
-                    await response.json(),
+                    data["error"],
                 )
         return data["data"]
 
     async def get_online_players(self) -> set:
         """Get a list of all players currently connected to the specified server"""
         players, index = set(), 0
-        async with aiohttp.ClientSession() as session:
-            while players_chunk := await self.send_request(
-                "/server/stats_players?tab=online&from=%s" % index, session
-            ):
-                players.update(
-                    [
-                        player["last_name"]
-                        for player in players_chunk
-                        if player["on_server"] == self.server
-                    ]
-                )
-                if len(players_chunk) < 50:
-                    break
-                index += 50
+        while players_chunk := await self.send_request(
+            "/server/stats_players?tab=online&from=%s" % index
+        ):
+            players.update(
+                [
+                    player["last_name"]
+                    for player in players_chunk
+                    if player["on_server"] == self.server
+                ]
+            )
+            if len(players_chunk) < 50:
+                break
+            index += 50
         return players
 
-    async def assert_player(
-        self, value: str | int, session: aiohttp.ClientSession | None = None
-    ) -> (bool, dict):
+    async def assert_player(self, value: str | int) -> (bool, dict):
         """
         Check if a player can be monitored (has access and is not banned)
         :param value: a nickname or an ID of the player
-        :param session: interface provided by aiohttp module
         :return: tuple: (bool: assertion,
                         dict: player's ID and nickname)
         """
-        param = "nick" if isinstance(value, str) else "id"
+        nk_param, unk_param = (
+            ["id", "nick"] if isinstance(value, int) else ["nick", "id"]
+        )
+        shortened_data = {nk_param: value, unk_param: None}
 
-        data = None
         try:
-            if session:
-                data = await self.send_request(
-                    "/user/profile?%s=%s" % (param, value),
-                    session,
-                )
-            else:
-                async with aiohttp.ClientSession() as acc_session:
-                    data = await self.send_request(
-                        "/user/profile?%s=%s" % (param, value),
-                        acc_session,
-                    )
+            data = await self.send_request("/user/profile?%s=%s" % (nk_param, value))
+            shortened_data[unk_param] = data[unk_param]
         except ResponseError as error:
-            if error.reference == "BAD_INTERNAL_STATUS":
-                return False, {param: value}
-
-        shortened_data = {"nick": data["nick"], "id": data["id"]}
+            if error.reference in ["BAD_STATUS_CODE", "BAD_INTERNAL_STATUS"]:
+                return False, shortened_data
+            raise ResponseError(error, error.reference, error.response)
 
         if "has_access" not in data or "banned" not in data:
             return False, shortened_data
@@ -191,11 +191,10 @@ class Announcer:
     async def execute(self) -> None:
         """
         Core functionality of the Announcer.
-        Check if any players joined or left the specified server
+        Check if any targeted players joined or left the server
         """
-        async with aiohttp.ClientSession() as session:
-            players = [self.assert_player(p, session) for p in self.targeted_players]
-            results = await asyncio.gather(*players)
+        requests = [self.assert_player(player) for player in self.targeted_players]
+        results = await asyncio.gather(*requests)
 
         targeted_nicks = set()
 
@@ -204,8 +203,6 @@ class Announcer:
                 targeted_nicks.add(data["nick"])
                 continue
 
-            if "nick" not in data:
-                data["nick"] = None
             await self.remove_player(data["id"], data["nick"])
             print("Removing %s due to unmet conditions!" % data["id"])
             # TODO
@@ -213,64 +210,46 @@ class Announcer:
         if not targeted_nicks:
             return
 
-        all_online_players = await self.get_online_players()
-        if not all_online_players:
+        active_players = await self.get_online_players()
+        if not active_players:
             return
 
         for nick in targeted_nicks:
-            if nick in all_online_players and nick not in self.online_players:
+            if nick in active_players and nick not in self.online_players:
                 self.online_players.add(nick)
                 print("%s joined the game!" % nick)
                 # TODO
 
-        for nick in copy(self.online_players):
-            if nick not in all_online_players:
+        for nick in set(self.online_players):
+            if nick not in active_players:
                 self.online_players.remove(nick)
                 print("%s left the game!" % nick)
                 # TODO
 
-    async def start_listener(self, handler) -> None:
-        """
-        Start listening for and handling user inputs
-        :param handler: outer function handling unexpected API behaviour
-        """
+    async def start_listener(self) -> None:
+        """Start listening for and handling user inputs"""
         while True:
             try:
                 field = await aioconsole.ainput()
                 await self.handle_input(field.strip())
             except ResponseError as error:
-                await handler(error)
+                await self.handler(error)
 
-    async def start_looper(self, handler) -> None:
-        """
-        Start the loop of repeating lookups
-        :param handler: outer function handling unexpected API behaviour
-        """
+    async def start_looper(self) -> None:
+        """Start the loop of repeating lookups"""
         while True:
             try:
                 await self.execute()
             except ResponseError as error:
-                await handler(error)
+                await self.handler(error)
             await asyncio.sleep(self.interval)
 
 
-async def handle_response_error(error):
-    print(error)
-    print(
-        "Response Body: %s"
-        % (
-            error.response["error"]
-            if error.reference == "BAD_INTERNAL_STATUS"
-            else error.response
-        )
-    )
-
-
 async def main():
-    announcer = Announcer(filename="players.txt", server="sur", interval=15)
+    announcer = Announcer(filename="../players.txt", server="sur", interval=15)
 
-    li = asyncio.ensure_future(announcer.start_listener(handle_response_error))
-    lo = asyncio.ensure_future(announcer.start_looper(handle_response_error))
+    li = asyncio.ensure_future(announcer.start_listener())
+    lo = asyncio.ensure_future(announcer.start_looper())
 
     await li
     await lo
