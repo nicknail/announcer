@@ -1,0 +1,6 @@
+{
+    "watchdog": {
+        "server": "sur",
+        "interval": 30
+    }
+}

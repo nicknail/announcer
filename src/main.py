@@ -1,6 +1,9 @@
 import aioconsole
 import aiohttp
 import asyncio
+
+import json
+import os
 import re
 
 from typing import Callable
@@ -17,54 +20,46 @@ class ResponseError(Exception):
 class Announcer:
     """
     Asynchronous watchdog for monitoring player activity on Plasmo RP,
-    making use of the Plasmo API and notifications daemon in Linux
+    making use of the Plasmo and Telegram Bot APIs
 
-    :param filename: path to the file containing list of targeted players
-    :param server: targeted server type: "sur" (prp.plo.su) or "cr" (crp.plo.su)
-    :param interval: frequency of the lookups, in seconds
+    :param players_path: path to the JSON file containing list of targeted players
+    :param settings_path: path to the JSON configuration file for the Announcer
     :param handler: outer function for handling unexpected API behaviour
     """
 
     API_LINK = "https://rp.plo.su/api"
     SERVERS = ("sur", "cr")
 
-    # TODO: normalize docstring types
-    def __init__(
-        self,
-        filename: str,
-        server: str = "sur",
-        interval: int = 60,
-        handler: Callable = None,
-    ):
-        self.filename = filename
-        self.server = server if server in self.SERVERS else self.SERVERS[0]
-        self.interval = max(15, interval)
-        self.handler = handler if handler else lambda e: print(e, e.reference, e.body)
+    # TODO: normalize docstring attribute types
+    def __init__(self, players_path: str, settings_path: str, handler: Callable = None):
+        self.players_path = players_path
 
-        self.counter = 0
-        self.session = aiohttp.ClientSession()
+        with open(self.players_path) as file:
+            players = json.load(file)
 
-        self.targeted_players = self.import_players()
+        self.targeted_players = set(players) if players else set()
         self.online_players = set()
 
-    def import_players(self) -> set:
-        """Import the list of player IDs whose activity needs to be monitored"""
-        with open(self.filename) as file:
-            file_content = file.read()
+        with open(settings_path) as file:
+            settings = json.load(file)
 
-        if file_content:
-            return set([int(s) for s in file_content.split(",")])
-        else:
-            return set()
+        self.server = (
+            settings["watchdog"]["server"]
+            if settings["watchdog"]["server"] in self.SERVERS
+            else self.SERVERS[0]
+        )
+        self.interval = max(15, settings["watchdog"]["interval"])
 
-    async def export_players(self) -> None:
+        self.handler = handler if handler else lambda e: print(e)
+        self.session = aiohttp.ClientSession()
+
+    async def save_changes(self) -> None:
         """
-        Export the list of player IDs to the specified file,
+        Export the list of player IDs to the configured file,
         wiping all the previously saved entries in the process
         """
-        formatted_list = ",".join([str(i) for i in self.targeted_players])
-        with open(self.filename, "w") as file:
-            file.write(formatted_list)
+        with open(self.players_path, "w") as file:
+            json.dump(list(self.targeted_players), file)
 
     async def add_player(self, player_id: int) -> None:
         """
@@ -72,7 +67,7 @@ class Announcer:
         :param player_id: player's corresponding ID stored in Plasmo database
         """
         self.targeted_players.add(player_id)
-        await self.export_players()
+        await self.save_changes()
 
     async def remove_player(self, player_id: int, player_nick: str = None) -> None:
         """
@@ -81,7 +76,7 @@ class Announcer:
         :param player_nick: player's nickname
         """
         self.targeted_players.remove(player_id)
-        await self.export_players()
+        await self.save_changes()
 
         if player_nick and player_nick in self.online_players:
             self.online_players.remove(player_nick)
@@ -92,8 +87,6 @@ class Announcer:
         :param route: URL path of the required method (e.g. /user)
         :return: dict: contents of the JSON object "data"
         """
-        print(self.counter, route)
-        self.counter += 1
         async with self.session.get(self.API_LINK + route) as response:
             content_type = response.headers.get("Content-Type")
             if not content_type == "application/json":
@@ -121,7 +114,7 @@ class Announcer:
         return data["data"]
 
     async def get_online_players(self) -> set:
-        """Get a list of all players currently connected to the specified server"""
+        """Get a list of all players currently connected to the configured server"""
         players, index = set(), 0
         while players_chunk := await self.send_request(
             "/server/stats_players?tab=online&from=%s" % index
@@ -182,11 +175,11 @@ class Announcer:
         if data["id"] not in self.targeted_players:
             await self.add_player(data["id"])
             print("Added %s to the list!" % field)
-            # TODO
+            # TODO: actual announcement
         else:
             await self.remove_player(data["id"], data["nick"])
             print("Removed %s from the list!" % field)
-            # TODO
+            # TODO: actual announcement
 
     async def execute(self) -> None:
         """
@@ -205,7 +198,7 @@ class Announcer:
 
             await self.remove_player(data["id"], data["nick"])
             print("Removing %s due to unmet conditions!" % data["id"])
-            # TODO
+            # TODO: actual announcement
 
         if not targeted_nicks:
             return
@@ -218,13 +211,13 @@ class Announcer:
             if nick in active_players and nick not in self.online_players:
                 self.online_players.add(nick)
                 print("%s joined the game!" % nick)
-                # TODO
+                # TODO: actual announcement
 
         for nick in set(self.online_players):
             if nick not in active_players:
                 self.online_players.remove(nick)
                 print("%s left the game!" % nick)
-                # TODO
+                # TODO: actual announcement
 
     async def start_listener(self) -> None:
         """Start listening for and handling user inputs"""
@@ -245,8 +238,12 @@ class Announcer:
             await asyncio.sleep(self.interval)
 
 
-async def main():
-    announcer = Announcer(filename="../players.txt", server="sur", interval=15)
+async def main() -> None:
+    script_path = os.path.dirname(os.path.realpath(__file__))
+    players_path = script_path + "/../config/players.json"
+    settings_path = script_path + "/../config/settings.json"
+
+    announcer = Announcer(players_path, settings_path)
 
     li = asyncio.ensure_future(announcer.start_listener())
     lo = asyncio.ensure_future(announcer.start_looper())

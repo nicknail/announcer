@@ -1,8 +1,6 @@
-# Announcer config
-players.txt
-
-# Development backups
-*.bak
+# Announcer configuration
+config/players.json
+config/settings.json
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
