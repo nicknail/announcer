@@ -7,11 +7,11 @@ from typing import Callable
 
 
 class ResponseError(Exception):
-    def __init__(self, message, reference, response):
+    def __init__(self, message, reference, body):
         super().__init__(message)
 
         self.reference = reference
-        self.response = response
+        self.body = body
 
 
 class Announcer:
@@ -20,9 +20,9 @@ class Announcer:
     making use of the Plasmo API and notifications daemon in Linux
 
     :param filename: path to the file containing list of targeted players
-    :param handler: outer function for handling unexpected API behaviour
-    :param interval: frequency of the lookups, in seconds
     :param server: targeted server type: "sur" (prp.plo.su) or "cr" (crp.plo.su)
+    :param interval: frequency of the lookups, in seconds
+    :param handler: outer function for handling unexpected API behaviour
     """
 
     API_LINK = "https://rp.plo.su/api"
@@ -32,14 +32,14 @@ class Announcer:
     def __init__(
         self,
         filename: str,
-        handler: Callable = None,
-        interval: int = 60,
         server: str = "sur",
+        interval: int = 60,
+        handler: Callable = None,
     ):
         self.filename = filename
-        self.handler = handler if handler else lambda e: print(e)
-        self.interval = max(15, interval)
         self.server = server if server in self.SERVERS else self.SERVERS[0]
+        self.interval = max(15, interval)
+        self.handler = handler if handler else lambda e: print(e, e.reference, e.body)
 
         self.counter = 0
         self.session = aiohttp.ClientSession()
@@ -156,7 +156,7 @@ class Announcer:
         except ResponseError as error:
             if error.reference in ["BAD_STATUS_CODE", "BAD_INTERNAL_STATUS"]:
                 return False, shortened_data
-            raise ResponseError(error, error.reference, error.response)
+            raise
 
         if "has_access" not in data or "banned" not in data:
             return False, shortened_data
@@ -233,7 +233,7 @@ class Announcer:
                 field = await aioconsole.ainput()
                 await self.handle_input(field.strip())
             except ResponseError as error:
-                await self.handler(error)
+                self.handler(error)
 
     async def start_looper(self) -> None:
         """Start the loop of repeating lookups"""
@@ -241,7 +241,7 @@ class Announcer:
             try:
                 await self.execute()
             except ResponseError as error:
-                await self.handler(error)
+                self.handler(error)
             await asyncio.sleep(self.interval)
 
 
