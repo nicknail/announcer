@@ -10,6 +10,8 @@ from typing import Callable
 
 
 class ResponseError(Exception):
+    """Raise upon failing to request data from the Plasmo API"""
+
     def __init__(self, message, reference, body):
         super().__init__(message)
 
@@ -22,8 +24,8 @@ class Announcer:
     Asynchronous watchdog for monitoring player activity on Plasmo RP,
     making use of the Plasmo and Telegram Bot APIs
 
-    :param players_path: path to the JSON file containing list of targeted players
-    :param settings_path: path to the JSON configuration file for the Announcer
+    :param players_path: path to the file with the list of targeted players
+    :param settings_path: path to the Announcer configuration file
     :param handler: outer function for handling unexpected API behaviour
     """
 
@@ -37,18 +39,16 @@ class Announcer:
         with open(self.players_path) as file:
             players = json.load(file)
 
-        self.targeted_players = set(players) if players else set()
+        self.targeted_players = set(players)
         self.online_players = set()
 
         with open(settings_path) as file:
             settings = json.load(file)
 
-        self.server = (
-            settings["watchdog"]["server"]
-            if settings["watchdog"]["server"] in self.SERVERS
-            else self.SERVERS[0]
-        )
-        self.interval = max(15, settings["watchdog"]["interval"])
+        server, interval = settings["watchdog"].values()
+
+        self.server = server if server in self.SERVERS else self.SERVERS[0]
+        self.interval = max(15, interval)
 
         self.handler = handler if handler else lambda e: print(e)
         self.session = aiohttp.ClientSession()
@@ -63,7 +63,7 @@ class Announcer:
 
     async def add_player(self, player_id: int) -> None:
         """
-        Add an entry to the list of targeted players
+        Add an entry to the list of targets
         :param player_id: player's corresponding ID stored in Plasmo database
         """
         self.targeted_players.add(player_id)
@@ -71,7 +71,7 @@ class Announcer:
 
     async def remove_player(self, player_id: int, player_nick: str = None) -> None:
         """
-        Remove an entry from the list of targeted players
+        Remove an entry from the list of targets
         :param player_id: player's corresponding ID stored in Plasmo database
         :param player_nick: player's nickname
         """
@@ -133,9 +133,9 @@ class Announcer:
 
     async def assert_player(self, value: str | int) -> (bool, dict):
         """
-        Check if a player can be monitored (has access and is not banned)
+        Check if a player should be monitored (has access and is not banned)
         :param value: a nickname or an ID of the player
-        :return: tuple: (bool: assertion,
+        :return: tuple: (bool: suitability,
                         dict: player's ID and nickname)
         """
         nk_param, unk_param = (
@@ -162,7 +162,7 @@ class Announcer:
     async def handle_input(self, field: str) -> None:
         """
         Check if an inputted string is an actual nickname and add/remove
-        its owner from to the list of targeted players if necessary
+        its owner from to the list of targets if necessary
         :param field: an inputted string
         """
         if not re.fullmatch(r"[a-zA-Z0-9_]{3,16}", field):
@@ -184,7 +184,8 @@ class Announcer:
     async def execute(self) -> None:
         """
         Core functionality of the Announcer.
-        Check if any targeted players joined or left the server
+        Check if any targets joined or left the server
+        and additionally remove the unsuitable ones
         """
         requests = [self.assert_player(player) for player in self.targeted_players]
         results = await asyncio.gather(*requests)
