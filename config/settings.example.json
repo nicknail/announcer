@@ -2,5 +2,9 @@
     "watchdog": {
         "server": "sur",
         "interval": 30
+    },
+    "bot": {
+        "token": "4839574812:AAFD39kkdpWt3ywyRZergyOLMaJhac60qc",
+        "owners": [123456789]
     }
 }

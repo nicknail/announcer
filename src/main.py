@@ -32,7 +32,7 @@ class Announcer:
     API_LINK = "https://rp.plo.su/api"
     SERVERS = ("sur", "cr")
 
-    # TODO: normalize docstring attribute types
+    # TODO: fix docstring attribute types
     def __init__(self, players_path: str, settings_path: str, handler: Callable = None):
         self.players_path = players_path
 
@@ -81,13 +81,12 @@ class Announcer:
         if player_nick and player_nick in self.online_players:
             self.online_players.remove(player_nick)
 
-    async def request_plasmo(self, route: str) -> dict:
+    async def query_plasmo(self, route: str) -> dict:
         """
         Request and handle (to certain extent) data from the Plasmo API
         :param route: URL path of the required method (e.g. /user)
         :return: dict: contents of the JSON object "data"
         """
-        print(route)
         async with self.session.get(self.API_LINK + route) as response:
             content_type = response.headers.get("Content-Type")
             if not content_type == "application/json":
@@ -127,7 +126,7 @@ class Announcer:
         shortened_data = {known_param: value, unknown_param: None}
 
         try:
-            data = await self.request_plasmo(
+            data = await self.query_plasmo(
                 "/user/profile?fields=stats&%s=%s" % (known_param, value)
             )
             shortened_data[unknown_param] = data[unknown_param]
