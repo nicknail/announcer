@@ -81,7 +81,7 @@ class Announcer:
         if player_nick and player_nick in self.online_players:
             self.online_players.remove(player_nick)
 
-    async def send_request(self, route: str) -> dict:
+    async def request_plasmo(self, route: str) -> dict:
         """
         Request and handle (to certain extent) data from the Plasmo API
         :param route: URL path of the required method (e.g. /user)
@@ -116,7 +116,7 @@ class Announcer:
     async def get_online_players(self) -> set:
         """Get a list of all players currently connected to the configured server"""
         players, index = set(), 0
-        while players_chunk := await self.send_request(
+        while players_chunk := await self.request_plasmo(
             "/server/stats_players?tab=online&from=%s" % index
         ):
             players.update(
@@ -138,16 +138,16 @@ class Announcer:
         :return: tuple: (bool: suitability,
                         dict: player's ID and nickname)
         """
-        nk_param, unk_param = (
-            ["id", "nick"] if isinstance(value, int) else ["nick", "id"]
+        known_param, unknown_param = (
+            ("id", "nick") if isinstance(value, int) else ("nick", "id")
         )
-        shortened_data = {nk_param: value, unk_param: None}
+        shortened_data = {known_param: value, unknown_param: None}
 
         try:
-            data = await self.send_request("/user/profile?%s=%s" % (nk_param, value))
-            shortened_data[unk_param] = data[unk_param]
+            data = await self.request_plasmo("/user/profile?%s=%s" % (known_param, value))
+            shortened_data[unknown_param] = data[unknown_param]
         except ResponseError as error:
-            if error.reference in ["BAD_STATUS_CODE", "BAD_INTERNAL_STATUS"]:
+            if error.reference in ("BAD_STATUS_CODE", "BAD_INTERNAL_STATUS"):
                 return False, shortened_data
             raise
 
@@ -185,7 +185,7 @@ class Announcer:
         """
         Core functionality of the Announcer.
         Check if any targets joined or left the server
-        and additionally remove the unsuitable ones
+        and additionally remove unsuitable targets
         """
         requests = [self.assert_player(player) for player in self.targeted_players]
         results = await asyncio.gather(*requests)
