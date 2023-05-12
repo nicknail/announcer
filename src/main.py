@@ -87,6 +87,7 @@ class Announcer:
         :param route: URL path of the required method (e.g. /user)
         :return: dict: contents of the JSON object "data"
         """
+        print(route)
         async with self.session.get(self.API_LINK + route) as response:
             content_type = response.headers.get("Content-Type")
             if not content_type == "application/json":
@@ -113,24 +114,6 @@ class Announcer:
                 )
         return data["data"]
 
-    async def get_online_players(self) -> set:
-        """Get a list of all players currently connected to the configured server"""
-        players, index = set(), 0
-        while players_chunk := await self.request_plasmo(
-            "/server/stats_players?tab=online&from=%s" % index
-        ):
-            players.update(
-                [
-                    player["last_name"]
-                    for player in players_chunk
-                    if player["on_server"] == self.server
-                ]
-            )
-            if len(players_chunk) < 50:
-                break
-            index += 50
-        return players
-
     async def assert_player(self, value: str | int) -> (bool, dict):
         """
         Check if a player should be monitored (has access and is not banned)
@@ -144,7 +127,9 @@ class Announcer:
         shortened_data = {known_param: value, unknown_param: None}
 
         try:
-            data = await self.request_plasmo("/user/profile?%s=%s" % (known_param, value))
+            data = await self.request_plasmo(
+                "/user/profile?fields=stats&%s=%s" % (known_param, value)
+            )
             shortened_data[unknown_param] = data[unknown_param]
         except ResponseError as error:
             if error.reference in ("BAD_STATUS_CODE", "BAD_INTERNAL_STATUS"):
@@ -157,6 +142,7 @@ class Announcer:
         if not data["has_access"] or data["banned"]:
             return False, shortened_data
 
+        shortened_data["server"] = data["stats"]["on_server"]
         return True, shortened_data
 
     async def handle_input(self, field: str) -> None:
@@ -190,32 +176,21 @@ class Announcer:
         requests = [self.assert_player(player) for player in self.targeted_players]
         results = await asyncio.gather(*requests)
 
-        targeted_nicks = set()
-
         for assertion, data in results:
-            if assertion:
-                targeted_nicks.add(data["nick"])
+            player_id, nick, server = data["id"], data["nick"], data["server"]
+
+            if not assertion:
+                await self.remove_player(player_id, nick)
+                print("Removing %s (%s) due to unmet conditions!" % (nick, player_id))
+                # TODO: actual announcement
                 continue
 
-            await self.remove_player(data["id"], data["nick"])
-            print("Removing %s due to unmet conditions!" % data["id"])
-            # TODO: actual announcement
-
-        if not targeted_nicks:
-            return
-
-        active_players = await self.get_online_players()
-        if not active_players:
-            return
-
-        for nick in targeted_nicks:
-            if nick in active_players and nick not in self.online_players:
+            if server == self.server and nick not in self.online_players:
                 self.online_players.add(nick)
                 print("%s joined the game!" % nick)
                 # TODO: actual announcement
 
-        for nick in set(self.online_players):
-            if nick not in active_players:
+            if not server == self.server and nick in self.online_players:
                 self.online_players.remove(nick)
                 print("%s left the game!" % nick)
                 # TODO: actual announcement
