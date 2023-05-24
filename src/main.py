@@ -2,6 +2,7 @@ import aiohttp
 import asyncio
 
 import json
+import logging
 import os
 import re
 
@@ -9,11 +10,11 @@ import re
 class ResponseError(Exception):
     """Raise upon failing to request data from the API"""
 
-    def __init__(self, message, reference, error):
+    def __init__(self, message, reference, body):
         super().__init__(message)
 
         self.reference = reference
-        self.error = error
+        self.body = body
 
 
 class Announcer:
@@ -89,13 +90,15 @@ class Announcer:
         :param payload: URL query string
         :return: dict: contents of the JSON object "data"
         """
+        logging.debug("Requesting %s with URL query: %s" % (route, payload))
         async with self.session.get(
             self.PLASMO_API + route, params=payload
         ) as response:
             content_type = response.headers.get("Content-Type")
             if not content_type == "application/json":
                 raise ResponseError(
-                    'API returned data with unsupported type of "%s"' % content_type,
+                    'Plasmo API returned data with unsupported type of "%s"'
+                    % content_type,
                     "BAD_CONTENT_TYPE",
                     await response.text(),
                 )
@@ -103,7 +106,7 @@ class Announcer:
             data = await response.json()
             if not data["status"]:
                 raise ResponseError(
-                    "API returned an internal status of False",
+                    "Plasmo API returned an internal status of False",
                     "BAD_INTERNAL_STATUS",
                     data["error"]["msg"],
                 )
@@ -116,13 +119,14 @@ class Announcer:
         :param payload: URL query string
         :return: dict: contents of the JSON object "result"
         """
+        logging.debug("Requesting %s with URL query: %s" % (route, payload))
         async with self.session.get(
             self.TELEGRAM_API + route, params=payload
         ) as response:
             data = await response.json()
             if not data["ok"]:
                 raise ResponseError(
-                    "API returned an internal status of False",
+                    "Telegram API returned an internal status of False",
                     "BAD_INTERNAL_STATUS",
                     data["description"],
                 )
@@ -199,13 +203,13 @@ class Announcer:
         player_id, nick = data["id"], data["nick"]
 
         if player_id not in self.targeted_players:
+            logging.info("Adding %s (%s) to the targets (user)" % (nick, player_id))
             await self.add_player(player_id)
             await self.send_message(nick, "addition")
-            print("Added %s to the list!" % field)
         else:
+            logging.info("Removing %s (%s) from the targets (user)" % (nick, player_id))
             await self.remove_player(player_id, nick)
             await self.send_message(nick, "removal")
-            print("Removed %s from the list!" % field)
 
     async def get_updates(self) -> None:
         """
@@ -241,43 +245,56 @@ class Announcer:
             player_id, nick, server = data["id"], data["nick"], data["server"]
 
             if not assertion:
+                logging.info(
+                    "Removing %s (%s) from the list of targets (assertion)"
+                    % (nick, player_id)
+                )
                 await self.remove_player(player_id, nick)
                 await self.send_message(nick, "removal")
-                print("Removing %s (%s) due to unmet conditions!" % (nick, player_id))
                 continue
 
             if server in self.servers and nick not in self.online_players:
+                logging.info("%s (%s) appears to be online now" % (nick, player_id))
                 self.online_players.add(nick)
                 await self.send_message(nick, "join")
-                print("%s joined the game!" % nick)
 
             if server not in self.servers and nick in self.online_players:
+                logging.info("%s (%s) appears to be offline now" % (nick, player_id))
                 self.online_players.remove(nick)
                 await self.send_message(nick, "leave")
-                print("%s left the game!" % nick)
 
     async def start_listener(self) -> None:
         """Start listening for and handling user inputs"""
-        while True:
-            try:
+        try:
+            while True:
                 await self.get_updates()
-            except ResponseError as error:
-                print(error)
+        except ResponseError as error:
+            logging.error(error.body, exc_info=True)
 
     async def start_looper(self) -> None:
         """Start the loop of repeating lookups"""
-        while True:
-            try:
+        try:
+            while True:
                 await self.execute()
-            except ResponseError as error:
-                print(error)
-            await asyncio.sleep(self.interval)
+                await asyncio.sleep(self.interval)
+        except ResponseError as error:
+            logging.error(error.body, exc_info=True)
 
 
 async def main() -> None:
     script_path = os.path.dirname(os.path.realpath(__file__))
+
+    logging_path = script_path + "/../announcer.log"
     players_path = script_path + "/../config/players.json"
     settings_path = script_path + "/../config/settings.json"
+
+    logging.basicConfig(
+        datefmt="%H:%M:%S",
+        filemode="w",
+        filename=logging_path,
+        format="[%(asctime)s] [%(levelname)s]: %(message)s",
+        level=logging.INFO,
+    )
 
     announcer = Announcer(players_path, settings_path)
 
