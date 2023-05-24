@@ -5,17 +5,15 @@ import json
 import os
 import re
 
-from typing import Callable
-
 
 class ResponseError(Exception):
     """Raise upon failing to request data from the API"""
 
-    def __init__(self, message, reference, body):
+    def __init__(self, message, reference, error):
         super().__init__(message)
 
         self.reference = reference
-        self.body = body
+        self.error = error
 
 
 class Announcer:
@@ -25,19 +23,12 @@ class Announcer:
 
     :param players_path: path to the file with the list of targeted players
     :param settings_path: path to the Announcer configuration file
-    :param handler: outer function for handling unexpected API behaviour
     """
 
     PLASMO_API = "https://rp.plo.su/api"
-    PLASMO_SERVERS = ("sur", "cr")
+    SERVERS = ("sur", "cr")
 
-    # TODO: fix docstring attribute types
-    def __init__(
-        self,
-        players_path: str,
-        settings_path: str,
-        handler: Callable = lambda e: print(e),
-    ):
+    def __init__(self, players_path: str, settings_path: str):
         self.players_path = players_path
         with open(players_path) as file:
             players = json.load(file)
@@ -48,21 +39,20 @@ class Announcer:
         with open(settings_path) as file:
             settings = json.load(file)
 
-        # TODO: ???
-        self.servers = (
-            settings["watchdog"]["servers"]
-            if set(settings["watchdog"]["servers"]).issubset(set(self.PLASMO_SERVERS))
-            else self.PLASMO_SERVERS[0]
-        )
-        self.interval = max(15, settings["watchdog"]["interval"])
+        servers = settings["watchdog"]["servers"]
+        self.servers = set(s for s in servers if s in self.SERVERS) or self.SERVERS[:1]
 
-        self.TELEGRAM_API = "https://api.telegram.org/bot%s" % settings["bot"]["token"]
+        interval = settings["watchdog"]["interval"]
+        self.interval = max(15, interval)
+
+        token = settings["bot"]["token"]
+        self.TELEGRAM_API = "https://api.telegram.org/bot%s" % token
+
         self.owners = settings["bot"]["owners"]
+        self.alerts = settings["bot"]["alerts"]
 
-        self.handler = handler
-
-        self.offset = 0
         self.session = aiohttp.ClientSession()
+        self.offset = 0
 
     async def save_changes(self) -> None:
         """
@@ -99,7 +89,6 @@ class Announcer:
         :param payload: URL query string
         :return: dict: contents of the JSON object "data"
         """
-        print(route, payload)
         async with self.session.get(
             self.PLASMO_API + route, params=payload
         ) as response:
@@ -127,7 +116,6 @@ class Announcer:
         :param payload: URL query string
         :return: dict: contents of the JSON object "result"
         """
-        print(route, payload)
         async with self.session.get(
             self.TELEGRAM_API + route, params=payload
         ) as response:
@@ -140,33 +128,12 @@ class Announcer:
                 )
         return data["result"]
 
-    @staticmethod
-    async def format_link(nick: str) -> str:
-        # TODO: docstring here
-        return "[{0}](https://rp.plo.su/u/{0})".format(nick) if nick else "N/A"
-
-    async def send_message(self, fields: list):
-        # TODO: docstring & weird attribute name
-        requests = (
-            self.query_telegram(
-                "/sendMessage",
-                {
-                    "chat_id": owner,
-                    "text": "\n".join(fields),
-                    "parse_mode": "Markdown",
-                    "disable_web_page_preview": "true",
-                },
-            )
-            for owner in self.owners
-        )
-        await asyncio.gather(*requests)
-
     async def assert_player(self, value: str | int) -> (bool, dict):
         """
         Check if a player should be monitored (has access and is not banned)
         :param value: a nickname or an ID of the player
-        # TODO: ???
-        :return: tuple: (suitability; player's ID, nickname and status)
+        :return: tuple: (bool: suitability,
+                        dict: id, nick & server)
         """
         known_param, unknown_param = (
             ("id", "nick") if isinstance(value, int) else ("nick", "id")
@@ -192,6 +159,30 @@ class Announcer:
         shortened_data["server"] = data["stats"]["on_server"]
         return True, shortened_data
 
+    async def send_message(self, nick: str, alert_key: str) -> None:
+        """
+        Send an alert in Telegram to all the configured owners
+        :param nick: player's nickname mentioned in the alert
+        :param alert_key: type of the alert; stored in Announcer config
+        """
+        if alert_key not in self.alerts:
+            return
+
+        link = "[{0}](https://rp.plo.su/u/{0})".format(nick) if nick else "N/A"
+        requests = (
+            self.query_telegram(
+                "/sendMessage",
+                {
+                    "chat_id": owner,
+                    "text": self.alerts[alert_key] % link,
+                    "parse_mode": "Markdown",
+                    "disable_web_page_preview": "true",
+                },
+            )
+            for owner in self.owners
+        )
+        await asyncio.gather(*requests)
+
     async def handle_input(self, field: str) -> None:
         """
         Check if an inputted string is an actual nickname and add/remove
@@ -206,16 +197,36 @@ class Announcer:
             return
 
         player_id, nick = data["id"], data["nick"]
-        link = await self.format_link(nick)
 
         if player_id not in self.targeted_players:
             await self.add_player(player_id)
-            await self.send_message(["➕ %s added" % link])
+            await self.send_message(nick, "addition")
             print("Added %s to the list!" % field)
         else:
             await self.remove_player(player_id, nick)
-            await self.send_message(["➖ %s removed" % link])
+            await self.send_message(nick, "removal")
             print("Removed %s from the list!" % field)
+
+    async def get_updates(self) -> None:
+        """
+        Check if any messages were sent to the
+        configured bot and handle them if necessary
+        """
+        result = await self.query_telegram(
+            "/getUpdates",
+            {"offset": self.offset, "timeout": 60, "allowed_updates": "message"},
+        )
+        for data in result:
+            self.offset = max(self.offset, data["update_id"] + 1)
+
+            if "message" not in data:
+                continue
+
+            user = data["message"]["from"]["id"]
+            if user not in self.owners or "text" not in data["message"]:
+                continue
+
+            await self.handle_input(data["message"]["text"])
 
     async def execute(self) -> None:
         """
@@ -226,46 +237,24 @@ class Announcer:
         requests = (self.assert_player(player) for player in self.targeted_players)
         results = await asyncio.gather(*requests)
 
-        messages = []
-
         for assertion, data in results:
             player_id, nick, server = data["id"], data["nick"], data["server"]
-            link = await self.format_link(nick)
 
             if not assertion:
                 await self.remove_player(player_id, nick)
-                messages.append("➖ %s removed" % link)
+                await self.send_message(nick, "removal")
                 print("Removing %s (%s) due to unmet conditions!" % (nick, player_id))
                 continue
 
             if server in self.servers and nick not in self.online_players:
                 self.online_players.add(nick)
-                messages.append("🟢 %s joined %s" % (link, server.upper()))
+                await self.send_message(nick, "join")
                 print("%s joined the game!" % nick)
 
             if server not in self.servers and nick in self.online_players:
                 self.online_players.remove(nick)
-                messages.append("🔴 %s left" % link)
+                await self.send_message(nick, "leave")
                 print("%s left the game!" % nick)
-
-        if messages:
-            await self.send_message(messages)
-
-    async def get_updates(self) -> None:
-        payload = {"offset": self.offset, "timeout": 60, "allowed_updates": "message"}
-        result = await self.query_telegram("/getUpdates", payload)
-        for data in result:
-            self.offset = max(self.offset, data["update_id"] + 1)
-
-            if "message" not in data:
-                continue
-
-            if data["message"]["from"]["id"] not in self.owners:
-                continue
-
-            if "text" not in data["message"]:
-                continue
-            await self.handle_input(data["message"]["text"])
 
     async def start_listener(self) -> None:
         """Start listening for and handling user inputs"""
@@ -273,7 +262,7 @@ class Announcer:
             try:
                 await self.get_updates()
             except ResponseError as error:
-                self.handler(error)
+                print(error)
 
     async def start_looper(self) -> None:
         """Start the loop of repeating lookups"""
@@ -281,7 +270,7 @@ class Announcer:
             try:
                 await self.execute()
             except ResponseError as error:
-                self.handler(error)
+                print(error)
             await asyncio.sleep(self.interval)
 
 
