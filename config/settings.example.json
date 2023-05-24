@@ -1,6 +1,6 @@
 {
     "watchdog": {
-        "server": "sur",
+        "servers": ["sur"],
         "interval": 30
     },
     "bot": {

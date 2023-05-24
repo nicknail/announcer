@@ -1,4 +1,3 @@
-import aioconsole
 import aiohttp
 import asyncio
 
@@ -10,7 +9,7 @@ from typing import Callable
 
 
 class ResponseError(Exception):
-    """Raise upon failing to request data from the Plasmo API"""
+    """Raise upon failing to request data from the API"""
 
     def __init__(self, message, reference, body):
         super().__init__(message)
@@ -29,14 +28,18 @@ class Announcer:
     :param handler: outer function for handling unexpected API behaviour
     """
 
-    API_LINK = "https://rp.plo.su/api"
-    SERVERS = ("sur", "cr")
+    PLASMO_API = "https://rp.plo.su/api"
+    PLASMO_SERVERS = ("sur", "cr")
 
     # TODO: fix docstring attribute types
-    def __init__(self, players_path: str, settings_path: str, handler: Callable = None):
+    def __init__(
+        self,
+        players_path: str,
+        settings_path: str,
+        handler: Callable = lambda e: print(e),
+    ):
         self.players_path = players_path
-
-        with open(self.players_path) as file:
+        with open(players_path) as file:
             players = json.load(file)
 
         self.targeted_players = set(players)
@@ -45,12 +48,20 @@ class Announcer:
         with open(settings_path) as file:
             settings = json.load(file)
 
-        server, interval = settings["watchdog"].values()
+        # TODO: ???
+        self.servers = (
+            settings["watchdog"]["servers"]
+            if set(settings["watchdog"]["servers"]).issubset(set(self.PLASMO_SERVERS))
+            else self.PLASMO_SERVERS[0]
+        )
+        self.interval = max(15, settings["watchdog"]["interval"])
 
-        self.server = server if server in self.SERVERS else self.SERVERS[0]
-        self.interval = max(15, interval)
+        self.TELEGRAM_API = "https://api.telegram.org/bot%s" % settings["bot"]["token"]
+        self.owners = settings["bot"]["owners"]
 
-        self.handler = handler if handler else lambda e: print(e)
+        self.handler = handler
+
+        self.offset = 0
         self.session = aiohttp.ClientSession()
 
     async def save_changes(self) -> None:
@@ -64,7 +75,7 @@ class Announcer:
     async def add_player(self, player_id: int) -> None:
         """
         Add an entry to the list of targets
-        :param player_id: player's corresponding ID stored in Plasmo database
+        :param player_id: player's corresponding ID
         """
         self.targeted_players.add(player_id)
         await self.save_changes()
@@ -72,7 +83,7 @@ class Announcer:
     async def remove_player(self, player_id: int, player_nick: str = None) -> None:
         """
         Remove an entry from the list of targets
-        :param player_id: player's corresponding ID stored in Plasmo database
+        :param player_id: player's corresponding ID
         :param player_nick: player's nickname
         """
         self.targeted_players.remove(player_id)
@@ -81,13 +92,17 @@ class Announcer:
         if player_nick and player_nick in self.online_players:
             self.online_players.remove(player_nick)
 
-    async def query_plasmo(self, route: str) -> dict:
+    async def query_plasmo(self, route: str, payload: dict) -> dict:
         """
         Request and handle (to certain extent) data from the Plasmo API
-        :param route: URL path of the required method (e.g. /user)
+        :param route: URL path of the method (e.g. /user)
+        :param payload: URL query string
         :return: dict: contents of the JSON object "data"
         """
-        async with self.session.get(self.API_LINK + route) as response:
+        print(route, payload)
+        async with self.session.get(
+            self.PLASMO_API + route, params=payload
+        ) as response:
             content_type = response.headers.get("Content-Type")
             if not content_type == "application/json":
                 raise ResponseError(
@@ -96,42 +111,75 @@ class Announcer:
                     await response.text(),
                 )
 
-            status_code = response.status
-            if not status_code == 200:
-                raise ResponseError(
-                    "API returned a status code of %s" % status_code,
-                    "BAD_STATUS_CODE",
-                    await response.json(),
-                )
-
             data = await response.json()
             if not data["status"]:
                 raise ResponseError(
                     "API returned an internal status of False",
                     "BAD_INTERNAL_STATUS",
-                    data["error"],
+                    data["error"]["msg"],
                 )
         return data["data"]
+
+    async def query_telegram(self, route: str, payload: dict) -> dict:
+        """
+        Request and handle data from the Telegram Bot API
+        :param route: URL path of the required method (e.g. /getMe)
+        :param payload: URL query string
+        :return: dict: contents of the JSON object "result"
+        """
+        print(route, payload)
+        async with self.session.get(
+            self.TELEGRAM_API + route, params=payload
+        ) as response:
+            data = await response.json()
+            if not data["ok"]:
+                raise ResponseError(
+                    "API returned an internal status of False",
+                    "BAD_INTERNAL_STATUS",
+                    data["description"],
+                )
+        return data["result"]
+
+    @staticmethod
+    async def format_link(nick: str) -> str:
+        # TODO: docstring here
+        return "[{0}](https://rp.plo.su/u/{0})".format(nick) if nick else "N/A"
+
+    async def send_message(self, fields: list):
+        # TODO: docstring & weird attribute name
+        requests = (
+            self.query_telegram(
+                "/sendMessage",
+                {
+                    "chat_id": owner,
+                    "text": "\n".join(fields),
+                    "parse_mode": "Markdown",
+                    "disable_web_page_preview": "true",
+                },
+            )
+            for owner in self.owners
+        )
+        await asyncio.gather(*requests)
 
     async def assert_player(self, value: str | int) -> (bool, dict):
         """
         Check if a player should be monitored (has access and is not banned)
         :param value: a nickname or an ID of the player
-        :return: tuple: (bool: suitability,
-                        dict: player's ID and nickname)
+        # TODO: ???
+        :return: tuple: (suitability; player's ID, nickname and status)
         """
         known_param, unknown_param = (
             ("id", "nick") if isinstance(value, int) else ("nick", "id")
         )
-        shortened_data = {known_param: value, unknown_param: None}
+        shortened_data = {known_param: value, unknown_param: None, "server": None}
 
         try:
             data = await self.query_plasmo(
-                "/user/profile?fields=stats&%s=%s" % (known_param, value)
+                "/user/profile", {known_param: value, "fields": "stats"}
             )
             shortened_data[unknown_param] = data[unknown_param]
         except ResponseError as error:
-            if error.reference in ("BAD_STATUS_CODE", "BAD_INTERNAL_STATUS"):
+            if not error.reference == "BAD_CONTENT_TYPE":
                 return False, shortened_data
             raise
 
@@ -157,14 +205,17 @@ class Announcer:
         if not assertion:
             return
 
-        if data["id"] not in self.targeted_players:
-            await self.add_player(data["id"])
+        player_id, nick = data["id"], data["nick"]
+        link = await self.format_link(nick)
+
+        if player_id not in self.targeted_players:
+            await self.add_player(player_id)
+            await self.send_message(["➕ %s added" % link])
             print("Added %s to the list!" % field)
-            # TODO: actual announcement
         else:
-            await self.remove_player(data["id"], data["nick"])
+            await self.remove_player(player_id, nick)
+            await self.send_message(["➖ %s removed" % link])
             print("Removed %s from the list!" % field)
-            # TODO: actual announcement
 
     async def execute(self) -> None:
         """
@@ -172,34 +223,55 @@ class Announcer:
         Check if any targets joined or left the server
         and additionally remove unsuitable targets
         """
-        requests = [self.assert_player(player) for player in self.targeted_players]
+        requests = (self.assert_player(player) for player in self.targeted_players)
         results = await asyncio.gather(*requests)
+
+        messages = []
 
         for assertion, data in results:
             player_id, nick, server = data["id"], data["nick"], data["server"]
+            link = await self.format_link(nick)
 
             if not assertion:
                 await self.remove_player(player_id, nick)
+                messages.append("➖ %s removed" % link)
                 print("Removing %s (%s) due to unmet conditions!" % (nick, player_id))
-                # TODO: actual announcement
                 continue
 
-            if server == self.server and nick not in self.online_players:
+            if server in self.servers and nick not in self.online_players:
                 self.online_players.add(nick)
+                messages.append("🟢 %s joined %s" % (link, server.upper()))
                 print("%s joined the game!" % nick)
-                # TODO: actual announcement
 
-            if not server == self.server and nick in self.online_players:
+            if server not in self.servers and nick in self.online_players:
                 self.online_players.remove(nick)
+                messages.append("🔴 %s left" % link)
                 print("%s left the game!" % nick)
-                # TODO: actual announcement
+
+        if messages:
+            await self.send_message(messages)
+
+    async def get_updates(self) -> None:
+        payload = {"offset": self.offset, "timeout": 60, "allowed_updates": "message"}
+        result = await self.query_telegram("/getUpdates", payload)
+        for data in result:
+            self.offset = max(self.offset, data["update_id"] + 1)
+
+            if "message" not in data:
+                continue
+
+            if data["message"]["from"]["id"] not in self.owners:
+                continue
+
+            if "text" not in data["message"]:
+                continue
+            await self.handle_input(data["message"]["text"])
 
     async def start_listener(self) -> None:
         """Start listening for and handling user inputs"""
         while True:
             try:
-                field = await aioconsole.ainput()
-                await self.handle_input(field.strip())
+                await self.get_updates()
             except ResponseError as error:
                 self.handler(error)
 
