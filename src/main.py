@@ -1,3 +1,4 @@
+import aiofiles
 import aiohttp
 import asyncio
 
@@ -47,23 +48,25 @@ class Announcer:
         self.interval = max(15, interval)
 
         token = settings["bot"]["token"]
-        self.TELEGRAM_API = "https://api.telegram.org/bot%s" % token
+        self.TELEGRAM_API = "https://api.telegram.org/bot" + token
 
         self.owners = settings["bot"]["owners"]
         self.alerts = settings["bot"]["alerts"]
 
         self.session = aiohttp.ClientSession()
-        self.offset = 0
+        self.offset, self.state = 0, True
 
-    async def save_changes(self) -> None:
+        logging.info("Announcer instance initiated")
+
+    async def save_changes(self):
         """
         Export the list of player IDs to the configured file,
         wiping all the previously saved entries in the process
         """
-        with open(self.players_path, "w") as file:
-            json.dump(list(self.targeted_players), file)
+        async with aiofiles.open(self.players_path, "w") as file:
+            await file.write(json.dumps(list(self.targeted_players)))
 
-    async def add_player(self, player_id: int) -> None:
+    async def add_player(self, player_id: int):
         """
         Add an entry to the list of targets
         :param player_id: player's corresponding ID
@@ -71,17 +74,17 @@ class Announcer:
         self.targeted_players.add(player_id)
         await self.save_changes()
 
-    async def remove_player(self, player_id: int, player_nick: str = None) -> None:
+    async def remove_player(self, player_id: int, nick: str = None):
         """
         Remove an entry from the list of targets
         :param player_id: player's corresponding ID
-        :param player_nick: player's nickname
+        :param nick: player's nickname
         """
         self.targeted_players.remove(player_id)
         await self.save_changes()
 
-        if player_nick and player_nick in self.online_players:
-            self.online_players.remove(player_nick)
+        if nick and nick in self.online_players:
+            self.online_players.remove(nick)
 
     async def query_plasmo(self, route: str, payload: dict) -> dict:
         """
@@ -90,24 +93,25 @@ class Announcer:
         :param payload: URL query string
         :return: dict: contents of the JSON object "data"
         """
-        logging.debug("Requesting %s with URL query: %s" % (route, payload))
+        logging.debug("Requesting %s with URL query: %s", route, payload)
         async with self.session.get(
             self.PLASMO_API + route, params=payload
         ) as response:
             content_type = response.headers.get("Content-Type")
             if not content_type == "application/json":
                 raise ResponseError(
-                    'Plasmo API returned data with unsupported type of "%s"'
-                    % content_type,
+                    'Plasmo API returned unsupported type of "%s"' % content_type,
                     "BAD_CONTENT_TYPE",
                     await response.text(),
                 )
 
             data = await response.json()
-            if not data["status"]:
+
+            status_code = response.status
+            if not status_code == 200:
                 raise ResponseError(
-                    "Plasmo API returned an internal status of False",
-                    "BAD_INTERNAL_STATUS",
+                    "Plasmo API returned a status code of %s" % status_code,
+                    "BAD_STATUS_CODE",
                     data["error"]["msg"],
                 )
         return data["data"]
@@ -119,7 +123,7 @@ class Announcer:
         :param payload: URL query string
         :return: dict: contents of the JSON object "result"
         """
-        logging.debug("Requesting %s with URL query: %s" % (route, payload))
+        logging.debug("Requesting %s with URL query: %s", route, payload)
         async with self.session.get(
             self.TELEGRAM_API + route, params=payload
         ) as response:
@@ -163,7 +167,7 @@ class Announcer:
         shortened_data["server"] = data["stats"]["on_server"]
         return True, shortened_data
 
-    async def send_message(self, nick: str, alert_key: str) -> None:
+    async def send_message(self, nick: str, alert_key: str):
         """
         Send an alert in Telegram to all the configured owners
         :param nick: player's nickname mentioned in the alert
@@ -187,7 +191,7 @@ class Announcer:
         )
         await asyncio.gather(*requests)
 
-    async def handle_input(self, field: str) -> None:
+    async def handle_input(self, field: str):
         """
         Check if an inputted string is an actual nickname and add/remove
         its owner from to the list of targets if necessary
@@ -203,15 +207,15 @@ class Announcer:
         player_id, nick = data["id"], data["nick"]
 
         if player_id not in self.targeted_players:
-            logging.info("Adding %s (%s) to the targets (user)" % (nick, player_id))
+            logging.info("Adding %s (%s) to the targets (user)", nick, player_id)
             await self.add_player(player_id)
             await self.send_message(nick, "addition")
         else:
-            logging.info("Removing %s (%s) from the targets (user)" % (nick, player_id))
+            logging.info("Removing %s (%s) from the targets (user)", nick, player_id)
             await self.remove_player(player_id, nick)
             await self.send_message(nick, "removal")
 
-    async def get_updates(self) -> None:
+    async def get_updates(self):
         """
         Check if any messages were sent to the
         configured bot and handle them if necessary
@@ -232,7 +236,7 @@ class Announcer:
 
             await self.handle_input(data["message"]["text"])
 
-    async def execute(self) -> None:
+    async def execute(self):
         """
         Core functionality of the Announcer.
         Check if any targets joined or left the server
@@ -246,42 +250,43 @@ class Announcer:
 
             if not assertion:
                 logging.info(
-                    "Removing %s (%s) from the list of targets (assertion)"
-                    % (nick, player_id)
+                    "Removing %s (%s) from the targets (assertion)", nick, player_id
                 )
                 await self.remove_player(player_id, nick)
                 await self.send_message(nick, "removal")
                 continue
 
             if server in self.servers and nick not in self.online_players:
-                logging.info("%s (%s) appears to be online now" % (nick, player_id))
+                logging.info("%s (%s) appears to be online now", nick, player_id)
                 self.online_players.add(nick)
                 await self.send_message(nick, "join")
 
             if server not in self.servers and nick in self.online_players:
-                logging.info("%s (%s) appears to be offline now" % (nick, player_id))
+                logging.info("%s (%s) appears to be offline now", nick, player_id)
                 self.online_players.remove(nick)
                 await self.send_message(nick, "leave")
 
-    async def start_listener(self) -> None:
+    async def start_listener(self):
         """Start listening for and handling user inputs"""
         try:
-            while True:
+            while self.state:
                 await self.get_updates()
         except ResponseError as error:
             logging.error(error.body, exc_info=True)
+            self.state = False
 
-    async def start_looper(self) -> None:
+    async def start_looper(self):
         """Start the loop of repeating lookups"""
         try:
-            while True:
+            while self.state:
                 await self.execute()
                 await asyncio.sleep(self.interval)
         except ResponseError as error:
             logging.error(error.body, exc_info=True)
+            self.state = False
 
 
-async def main() -> None:
+async def main():
     script_path = os.path.dirname(os.path.realpath(__file__))
 
     logging_path = script_path + "/../announcer.log"
@@ -290,7 +295,7 @@ async def main() -> None:
 
     logging.basicConfig(
         datefmt="%H:%M:%S",
-        filemode="w",
+        filemode="a",
         filename=logging_path,
         format="[%(asctime)s] [%(levelname)s]: %(message)s",
         level=logging.INFO,
@@ -303,6 +308,8 @@ async def main() -> None:
 
     await li
     await lo
+
+    await announcer.session.close()
 
 
 if __name__ == "__main__":
