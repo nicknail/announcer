@@ -128,10 +128,12 @@ class Announcer:
             self.TELEGRAM_API + route, params=payload
         ) as response:
             data = await response.json()
-            if not data["ok"]:
+
+            status_code = response.status
+            if not status_code == 200:
                 raise ResponseError(
-                    "Telegram API returned an internal status of False",
-                    "BAD_INTERNAL_STATUS",
+                    "Telegram API returned a status code of %s" % status_code,
+                    "BAD_STATUS_CODE",
                     data["description"],
                 )
         return data["result"]
@@ -220,10 +222,17 @@ class Announcer:
         Check if any messages were sent to the
         configured bot and handle them if necessary
         """
-        result = await self.query_telegram(
-            "/getUpdates",
-            {"offset": self.offset, "timeout": 60, "allowed_updates": "message"},
-        )
+        try:
+            result = await self.query_telegram(
+                "/getUpdates",
+                {"offset": self.offset, "timeout": 60, "allowed_updates": "message"},
+            )
+        except aiohttp.client_exceptions.ClientOSError:
+            logging.error(
+                "Lost connection during long polling. Skipping this iteration"
+            )
+            return
+
         for data in result:
             self.offset = max(self.offset, data["update_id"] + 1)
 
