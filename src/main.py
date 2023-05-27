@@ -259,7 +259,9 @@ class Announcer:
 
             if not assertion:
                 logging.info(
-                    "Removing %s (%s) from the targets (assertion)", nick, player_id
+                    "Removing %s (%s) from the targets (assertion)",
+                    nick or "N/A",
+                    player_id,
                 )
                 await self.remove_player(player_id, nick)
                 await self.send_message(nick, "removal")
@@ -280,8 +282,8 @@ class Announcer:
         try:
             while self.state:
                 await self.get_updates()
-        except ResponseError as error:
-            logging.error(error.body, exc_info=True)
+        except:
+            logging.error(error, exc_info=True)
             self.state = False
 
     async def start_looper(self):
@@ -290,8 +292,8 @@ class Announcer:
             while self.state:
                 await self.execute()
                 await asyncio.sleep(self.interval)
-        except ResponseError as error:
-            logging.error(error.body, exc_info=True)
+        except:
+            logging.error(error, exc_info=True)
             self.state = False
 
 
