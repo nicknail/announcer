@@ -27,7 +27,7 @@ class Announcer:
     :param settings_path: path to the Announcer configuration file
     """
 
-    PLASMO_API = "https://rp.plo.su/api"
+    PLASMO_API = "https://plasmorp.com/api"
     SERVERS = ("sur", "cr")
 
     def __init__(self, players_path: str, settings_path: str):
@@ -169,22 +169,22 @@ class Announcer:
         shortened_data["server"] = data["stats"]["on_server"]
         return True, shortened_data
 
-    async def send_message(self, nick: str, alert_key: str):
+    async def send_message(self, nick: str, alert: str):
         """
         Send an alert in Telegram to all the configured owners
         :param nick: player's nickname mentioned in the alert
-        :param alert_key: type of the alert; stored in Announcer config
+        :param alert: type of the alert; stored in Announcer config
         """
-        if alert_key not in self.alerts:
+        if alert not in self.alerts:
             return
 
-        link = "[{0}](https://rp.plo.su/u/{0})".format(nick) if nick else "N/A"
+        link = "[{0}](https://plasmorp.com/u/{0})".format(nick) if nick else "N/A"
         requests = (
             self.query_telegram(
                 "/sendMessage",
                 {
                     "chat_id": owner,
-                    "text": self.alerts[alert_key] % link,
+                    "text": self.alerts[alert] % link,
                     "parse_mode": "Markdown",
                     "disable_web_page_preview": "true",
                 },
@@ -211,11 +211,11 @@ class Announcer:
         if player_id not in self.targeted_players:
             logging.info("Adding %s (%s) to the targets (user)", nick, player_id)
             await self.add_player(player_id)
-            await self.send_message(nick, "addition")
+            await self.send_message(nick, "ADDITION")
         else:
             logging.info("Removing %s (%s) from the targets (user)", nick, player_id)
             await self.remove_player(player_id, nick)
-            await self.send_message(nick, "removal")
+            await self.send_message(nick, "REMOVAL")
 
     async def get_updates(self):
         """
@@ -264,25 +264,25 @@ class Announcer:
                     player_id,
                 )
                 await self.remove_player(player_id, nick)
-                await self.send_message(nick, "removal")
+                await self.send_message(nick, "REMOVAL")
                 continue
 
             if server in self.servers and nick not in self.online_players:
                 logging.info("%s (%s) appears to be online now", nick, player_id)
                 self.online_players.add(nick)
-                await self.send_message(nick, "join")
+                await self.send_message(nick, "JOIN")
 
             if server not in self.servers and nick in self.online_players:
                 logging.info("%s (%s) appears to be offline now", nick, player_id)
                 self.online_players.remove(nick)
-                await self.send_message(nick, "leave")
+                await self.send_message(nick, "LEAVE")
 
     async def start_listener(self):
         """Start listening for and handling user inputs"""
         try:
             while self.state:
                 await self.get_updates()
-        except:
+        except Exception as error:
             logging.error(error, exc_info=True)
             self.state = False
 
@@ -292,7 +292,7 @@ class Announcer:
             while self.state:
                 await self.execute()
                 await asyncio.sleep(self.interval)
-        except:
+        except Exception as error:
             logging.error(error, exc_info=True)
             self.state = False
 
@@ -306,7 +306,7 @@ async def main():
 
     logging.basicConfig(
         datefmt="%H:%M:%S",
-        filemode="a",
+        filemode="w",
         filename=logging_path,
         format="[%(asctime)s] [%(levelname)s]: %(message)s",
         level=logging.INFO,
