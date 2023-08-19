@@ -7,10 +7,10 @@
         "token": "4839574812:AAFD39kkdpWt3ywyRZergyOLMaJhac60qc",
         "owners": [123456789],
         "alerts": {
-            "ADDITION": "➕ %s added",
-            "REMOVAL": "➖ %s removed",
-            "JOIN": "🟢 %s joined the game",
-            "LEAVE": "🔴 %s left the game"
+            "ADDITION": "\u2795 %s added",
+            "REMOVAL": "\u2796 %s removed",
+            "JOIN": "\ud83d\udfe2 %s joined the game",
+            "LEAVE": "\ud83d\udd34 %s left the game"
         }
     }
 }
